@@ -92,6 +92,53 @@ def stooq_history(symbol):
     return close.sort_index()
 
 
+def yahoo_chart_history(symbol):
+    """Fetch Yahoo's public chart JSON directly, without yfinance cookies/crumbs."""
+    failures = []
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            url = f"https://{host}/v8/finance/chart/{symbol}"
+            response = requests.get(
+                url,
+                params={"range": "1y", "interval": "1d", "events": "history"},
+                timeout=20,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                },
+            )
+            response.raise_for_status()
+            result = response.json()["chart"]["result"][0]
+            timestamps = result.get("timestamp") or []
+            closes = result["indicators"]["quote"][0].get("close") or []
+            close = pd.Series(
+                closes,
+                index=pd.to_datetime(timestamps, unit="s", utc=True),
+                dtype="float64",
+                name="Close",
+            ).dropna()
+            if not close.empty:
+                return close.sort_index()
+            failures.append(f"{host}: no prices")
+        except Exception as exc:
+            failures.append(f"{host}: {exc}")
+    raise ValueError("; ".join(failures))
+
+
+def backup_history(symbol):
+    """Try independent download paths and report which one succeeded."""
+    failures = []
+    try:
+        return yahoo_chart_history(symbol), "Yahoo direct-chart fallback", failures
+    except Exception as exc:
+        failures.append(f"direct chart failed ({exc})")
+    try:
+        return stooq_history(symbol), "Stooq fallback", failures
+    except Exception as exc:
+        failures.append(f"Stooq failed ({exc})")
+    raise ValueError("; ".join(failures))
+
+
 def price_changes(close):
     current = clean_number(close.iloc[-1])
     change_1m = (current / clean_number(close.iloc[-22])) - 1 if len(close) > 21 else None
@@ -168,7 +215,7 @@ def collect_market_data(ticker_symbols):
         except Exception as exc:
             yahoo_error = str(exc)
             try:
-                close = stooq_history(symbol)
+                close, backup_name, backup_notes = backup_history(symbol)
                 current, change_1m, change_3m, change_1y = price_changes(close)
                 records.append(
                     {
@@ -192,13 +239,14 @@ def collect_market_data(ticker_symbols):
                         "change_1m_pct": pct(change_1m),
                         "change_3m_pct": pct(change_3m),
                         "change_1y_pct": pct(change_1y),
-                        "data_source": "Stooq fallback",
+                        "data_source": backup_name,
                         "data_timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     }
                 )
                 histories[symbol] = close.rename(symbol)
                 errors.append(
-                    f"{symbol}: Yahoo unavailable ({yahoo_error}); using Stooq price-history fallback. "
+                    f"{symbol}: standard Yahoo request unavailable ({yahoo_error}); "
+                    f"using {backup_name}. "
                     "Fundamentals and news are unavailable for this run."
                 )
             except Exception as backup_exc:
