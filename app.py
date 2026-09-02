@@ -1,9 +1,11 @@
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from io import StringIO
 
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
@@ -64,6 +66,40 @@ def compact(value):
     return f"{value:,.2f}"
 
 
+def stooq_history(symbol):
+    """Return one year of daily closes from Stooq as a Yahoo fallback."""
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=370)
+    stooq_symbol = f"{symbol.lower()}.us"
+    url = (
+        "https://stooq.com/q/d/l/"
+        f"?s={stooq_symbol}&d1={start:%Y%m%d}&d2={end:%Y%m%d}&i=d"
+    )
+    response = requests.get(
+        url,
+        timeout=20,
+        headers={"User-Agent": "Mozilla/5.0 ThesisTester/1.0"},
+    )
+    response.raise_for_status()
+    frame = pd.read_csv(StringIO(response.text))
+    if frame.empty or "Date" not in frame or "Close" not in frame:
+        raise ValueError("backup source returned no price history")
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce", utc=True)
+    frame["Close"] = pd.to_numeric(frame["Close"], errors="coerce")
+    close = frame.dropna(subset=["Date", "Close"]).set_index("Date")["Close"]
+    if close.empty:
+        raise ValueError("backup source returned no usable closing prices")
+    return close.sort_index()
+
+
+def price_changes(close):
+    current = clean_number(close.iloc[-1])
+    change_1m = (current / clean_number(close.iloc[-22])) - 1 if len(close) > 21 else None
+    change_3m = (current / clean_number(close.iloc[-64])) - 1 if len(close) > 63 else None
+    change_1y = (current / clean_number(close.iloc[0])) - 1 if len(close) > 1 else None
+    return current, change_1m, change_3m, change_1y
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def collect_market_data(ticker_symbols):
     records = []
@@ -82,16 +118,7 @@ def collect_market_data(ticker_symbols):
                 continue
 
             close = history["Close"].dropna()
-            current = clean_number(close.iloc[-1])
-            change_1m = None
-            change_3m = None
-            change_1y = None
-            if len(close) > 21:
-                change_1m = (current / clean_number(close.iloc[-22])) - 1
-            if len(close) > 63:
-                change_3m = (current / clean_number(close.iloc[-64])) - 1
-            if len(close) > 1:
-                change_1y = (current / clean_number(close.iloc[0])) - 1
+            current, change_1m, change_3m, change_1y = price_changes(close)
 
             record = {
                 "ticker": symbol,
@@ -139,7 +166,46 @@ def collect_market_data(ticker_symbols):
                         }
                     )
         except Exception as exc:
-            errors.append(f"{symbol}: {exc}")
+            yahoo_error = str(exc)
+            try:
+                close = stooq_history(symbol)
+                current, change_1m, change_3m, change_1y = price_changes(close)
+                records.append(
+                    {
+                        "ticker": symbol,
+                        "company": symbol,
+                        "price": round(current, 2) if current is not None else None,
+                        "currency": "USD",
+                        "market_cap": None,
+                        "trailing_pe": None,
+                        "forward_pe": None,
+                        "price_to_sales": None,
+                        "revenue_growth_pct": None,
+                        "earnings_growth_pct": None,
+                        "gross_margin_pct": None,
+                        "operating_margin_pct": None,
+                        "free_cash_flow": None,
+                        "debt_to_equity": None,
+                        "analyst_target_mean": None,
+                        "analyst_count": None,
+                        "recommendation": None,
+                        "change_1m_pct": pct(change_1m),
+                        "change_3m_pct": pct(change_3m),
+                        "change_1y_pct": pct(change_1y),
+                        "data_source": "Stooq fallback",
+                        "data_timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    }
+                )
+                histories[symbol] = close.rename(symbol)
+                errors.append(
+                    f"{symbol}: Yahoo unavailable ({yahoo_error}); using Stooq price-history fallback. "
+                    "Fundamentals and news are unavailable for this run."
+                )
+            except Exception as backup_exc:
+                errors.append(
+                    f"{symbol}: Yahoo unavailable ({yahoo_error}); "
+                    f"backup also failed ({backup_exc})"
+                )
 
     return records, histories, news_items, errors
 
@@ -203,7 +269,8 @@ List the most important missing data that could change the verdict.
 
 # Sources
 List only the supplied working news URLs and identify market/fundamental metrics
-as sourced from Yahoo Finance. Do not create URLs.
+as sourced from Yahoo Finance or the Stooq fallback, according to the supplied
+record. Do not create URLs.
 
 SUPPLIED EVIDENCE:
 {json.dumps(evidence, indent=2, default=str)}
