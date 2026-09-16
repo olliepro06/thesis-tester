@@ -272,9 +272,22 @@ def build_prompt(thesis, tickers, action, horizon, weights, records, news_items)
 
     return f"""
 You are an evidence-led investment committee analyst. Test the user's thesis;
-do not merely agree with it. Use only the supplied evidence for company-specific
-facts. If evidence is absent, explicitly label it as missing. Do not invent
-figures, events, quotations, forecasts, probabilities, or sources.
+do not merely agree with it.
+
+Before writing the report, use web search extensively. Break the thesis into
+testable claims and research each one. Find the original catalyst or statement,
+recent company filings and earnings materials, management guidance, relevant
+industry data, current valuations, and credible opposing evidence.
+
+Prioritise primary sources: regulatory filings, company investor-relations
+pages, original statements, official transcripts, and government data. Use
+reputable financial reporting when primary evidence is unavailable. Treat
+analyst commentary and social-media posts as weaker evidence.
+
+Use the supplied market data alongside the researched evidence. Every material
+current fact, number, quotation, or event must have a clickable citation close
+to the claim. Clearly distinguish facts, estimates, interpretations, and missing
+evidence. Never invent figures, events, quotations, forecasts, or sources.
 
 This is decision support, not personalised financial advice. Separate observed
 facts from interpretations. Treat analyst targets and recommendations as weak
@@ -316,9 +329,10 @@ Give specific observable invalidation conditions and upcoming evidence to monito
 List the most important missing data that could change the verdict.
 
 # Sources
-List only the supplied working news URLs and identify market/fundamental metrics
-as sourced from Yahoo Finance or the Stooq fallback, according to the supplied
-record. Do not create URLs.
+Provide a numbered list of every source actually used. Include the source title,
+publisher, publication date when available, and a clickable URL. Group primary
+sources before secondary sources. Do not list a source unless it supports
+something in the report, and never invent a URL.
 
 SUPPLIED EVIDENCE:
 {json.dumps(evidence, indent=2, default=str)}
@@ -330,6 +344,7 @@ def call_analyst(api_key, model, prompt):
     response = client.responses.create(
         model=model,
         reasoning={"effort": "medium"},
+                tools=[{"type": "web_search", "search_context_size": "high"}],
         input=[
             {
                 "role": "developer",
